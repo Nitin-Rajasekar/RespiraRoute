@@ -207,4 +207,5 @@ async def _async_sleep(seconds: float):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host=API_HOST, port=API_PORT)
+    port = int(os.environ.get("PORT", API_PORT))
+    uvicorn.run(app, host="0.0.0.0", port=port)
