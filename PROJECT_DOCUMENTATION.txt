@@ -1,0 +1,453 @@
+================================================================================
+          HEALTHYROUTE AI — COMPLETE APPLICATION DOCUMENTATION
+          Hack For Green Bharat Hackathon | February 2026
+================================================================================
+
+
+1. WHAT IS THIS APP?
+================================================================================
+
+HealthyRoute AI is a real-time urban air quality monitoring and intelligent
+route recommendation system for Delhi. It helps commuters choose routes with
+the least pollution exposure by:
+
+  - Streaming live AQI, traffic, and weather data from 6 city zones
+  - Processing it through a real Pathway streaming pipeline
+  - Calculating "exposure scores" for different routes
+  - Letting users search any start/destination and get the healthiest route
+  - Showing everything on an interactive map
+  - Providing AI-powered health and pollution explanations
+
+
+2. TECH STACK
+================================================================================
+
+  Backend (runs in WSL/Linux):
+    - Python 3.12
+    - Pathway 0.28.0      — Real-time streaming data engine (Rust-powered)
+    - FastAPI 0.109.0      — REST API server
+    - Uvicorn              — ASGI server
+    - httpx                — Async HTTP client (for OSRM/Nominatim APIs)
+    - OpenAI (optional)    — AI-generated explanations
+
+  Frontend (runs on Windows):
+    - React 18             — UI framework
+    - Tailwind CSS 3.4     — Styling
+    - Leaflet + react-leaflet — Interactive maps
+    - Vanilla fetch()      — API calls (no axios needed)
+
+  External APIs (free, no keys):
+    - OSRM                 — Driving route alternatives with geometry
+    - Nominatim            — OpenStreetMap geocoding + autocomplete
+
+
+3. FILE STRUCTURE
+================================================================================
+
+  aqi-app-2/
+  ├── backend/
+  │   ├── config.py               — Zone coordinates, routes, thresholds
+  │   ├── data_simulator.py       — Generates fake sensor data (JSONL)
+  │   ├── pathway_pipeline.py     — REAL Pathway pipeline (core of the app)
+  │   ├── route_calculator.py     — Exposure scoring for predefined routes
+  │   ├── custom_router.py        — OSRM routing + Nominatim geocoding
+  │   ├── ai_explainer.py         — AI/rule-based explanations
+  │   ├── server.py               — FastAPI server (all endpoints)
+  │   └── stream_data/
+  │       └── zone_data.jsonl     — Live streaming data file
+  │
+  ├── frontend/
+  │   └── src/
+  │       ├── App.jsx                        — Root component
+  │       └── components/
+  │           ├── Header.jsx                 — Top bar + connection status
+  │           ├── RouteSearch.jsx            — Custom route search form
+  │           ├── LocationAutocomplete.jsx   — Autocomplete input
+  │           ├── RouteComparison.jsx        — Route exposure comparison
+  │           ├── RouteMap.jsx               — Leaflet map with routes
+  │           ├── HealthGauge.jsx            — Circular health score
+  │           ├── ZoneCards.jsx              — Live zone monitoring grid
+  │           └── AiPanel.jsx               — AI explanation interface
+  │
+  └── requirements.txt
+
+
+4. HOW PATHWAY IS USED (MOST IMPORTANT PART)
+================================================================================
+
+This is what the hackathon judges care about. Here's exactly how we use the
+real Pathway framework:
+
+  FILE: backend/pathway_pipeline.py
+  IMPORT: import pathway as pw
+
+  STAGE 1 — DATA INGESTION (Pathway Connector)
+  ─────────────────────────────────────────────
+    zone_data = pw.io.jsonlines.read(
+        STREAM_DIR,
+        schema=ZoneSchema,
+        mode="streaming",
+        autocommit_duration_ms=1500,
+    )
+
+    What it does: Pathway's built-in JSONL file connector watches the
+    stream_data/ directory. Every time the simulator appends new records,
+    Pathway automatically detects and ingests them. No polling loop needed.
+
+    Schema: ZoneSchema(pw.Schema) with typed fields:
+      zone (str), aqi (int), traffic_level (str), temperature_c (float), etc.
+
+
+  STAGE 2 — STREAMING TRANSFORMATIONS (Temporal Windows)
+  ─────────────────────────────────────────────────────────
+    zone_stats = zone_data.windowby(
+        zone_data.tick,
+        window=pw.temporal.sliding(duration=10, hop=1),
+        instance=pw.this.zone,
+    ).reduce(
+        zone=pw.this._pw_instance,
+        avg_aqi=pw.reducers.avg(pw.this.aqi),
+        max_aqi=pw.reducers.max(pw.this.aqi),
+        min_aqi=pw.reducers.min(pw.this.aqi),
+        count=pw.reducers.count(),
+        sum_sq_aqi=pw.reducers.sum(pw.this.aqi * pw.this.aqi),
+    )
+
+    What it does: For each zone, maintains a sliding window of the last 10
+    ticks (30 seconds of data). Computes rolling average, min, max AQI, and
+    the sum of squares (for volatility calculation). Recomputes automatically
+    as new data arrives — this is incremental computation, not batch.
+
+    Additional derived columns via @pw.udf:
+      - compute_volatility(): standard deviation of AQI in the window
+      - compute_trend(): rising/falling/stable based on current vs average
+
+
+  STAGE 3 — ANOMALY DETECTION (Streaming Filter)
+  ──────────────────────────────────────────────────
+    anomalies = zone_data.filter(pw.this.aqi > 200)
+
+    What it does: Declarative filter that flags any zone reading where
+    AQI exceeds 200 (the "Very Unhealthy" threshold). Pathway evaluates
+    this on every new record automatically.
+
+
+  STAGE 4 — OUTPUT (Subscribe Callbacks)
+  ──────────────────────────────────────────
+    pw.io.subscribe(zone_data, on_change=_on_zone_update)
+    pw.io.subscribe(zone_stats_enriched, on_change=_on_stats_update)
+    pw.io.subscribe(anomalies, on_change=_on_anomaly)
+
+    What it does: Three separate subscriptions push processed data into
+    thread-safe Python dicts. FastAPI reads these dicts to serve the
+    frontend. This bridges Pathway's streaming engine with the REST API.
+
+
+  EXECUTION:
+    pw.run()  — called in a daemon thread. This is Pathway's Rust engine
+    running continuously, processing the dataflow graph defined above.
+
+
+  PROOF IT'S REAL PATHWAY (from server logs):
+    [2026-02-15]:INFO:Preparing Pathway computation
+    [2026-02-15]:INFO:Enter read_snapshot method with reader PosixLike
+    [2026-02-15]:INFO:FileSystem(/root/aqi-backend/stream_data): 54 entries
+                      (6 minibatch(es)) have been sent to the engine
+    [2026-02-15]:INFO:subscribe-0: Done writing 18 entries
+    [2026-02-15]:INFO:subscribe-0: Done writing 288 entries
+    [2026-02-15]:INFO:subscribe-0: Done writing 3 entries
+
+
+5. ALL FEATURES AND HOW THEY WORK
+================================================================================
+
+
+FEATURE 1: Live Zone Monitoring
+───────────────────────────────
+  What user sees: 6 cards showing real-time AQI, traffic, wind, temp, humidity
+  for each Delhi zone, updating every 2 seconds.
+
+  How it works:
+    1. data_simulator.py generates sensor data every 3 seconds → writes JSONL
+    2. Pathway pipeline ingests it, computes rolling stats
+    3. FastAPI endpoint GET /api/dashboard reads pipeline state
+    4. React App.jsx polls /api/dashboard every 2 seconds
+    5. ZoneCards.jsx renders each zone with color-coded AQI
+
+  Files involved:
+    data_simulator.py → pathway_pipeline.py → server.py → App.jsx → ZoneCards.jsx
+
+
+FEATURE 2: Predefined Route Comparison
+───────────────────────────────────────
+  What user sees: 3 predefined routes (Via Highway, Via Green Park, Mixed Urban)
+  compared by exposure score, with the healthiest highlighted green.
+
+  How it works:
+    1. config.py defines 3 routes as sequences of (zone, time_minutes)
+    2. route_calculator.py computes exposure for each route:
+       exposure = SUM(aqi * time_in_zone * traffic_factor)
+    3. Routes sorted by exposure; lowest = recommended
+    4. RouteComparison.jsx renders bars + zone breakdown tags
+
+  Exposure formula:
+    For each zone segment:  zone_exposure = AQI * minutes * traffic_factor
+    traffic_factors: low=1.0, moderate=1.3, high=1.7, severe=2.2
+    Total: sum of all zone segments
+
+  Files involved:
+    config.py → route_calculator.py → server.py → App.jsx → RouteComparison.jsx
+
+
+FEATURE 3: Health Score Gauge
+─────────────────────────────
+  What user sees: Circular gauge showing 0-100 health score, pollution savings
+  percentage, and the recommended route name.
+
+  How it works:
+    health_score = 100 - (best_exposure / worst_exposure) * 100
+    savings_pct = (1 - best_exposure / worst_exposure) * 100
+
+  Files involved:
+    route_calculator.py → server.py → App.jsx → HealthGauge.jsx
+
+
+FEATURE 4: Custom Route Search with Autocomplete
+─────────────────────────────────────────────────
+  What user sees: Two input fields (Start, Destination) with dropdown
+  suggestions as you type. Click "Find Healthiest Route" to get results.
+
+  How autocomplete works:
+    1. User types >= 3 characters
+    2. After 400ms debounce, LocationAutocomplete.jsx calls
+       GET /api/autocomplete?q=Connaught+Place
+    3. server.py calls custom_router.autocomplete_location()
+    4. That calls Nominatim API with 1-second rate limiting
+    5. Returns up to 5 suggestions with display_name, lat, lng
+    6. User clicks a suggestion → coordinates stored in state
+
+  How route search works:
+    1. User clicks "Find Healthiest Route"
+    2. RouteSearch.jsx calls GET /api/custom-routes?start=lat,lng&end=lat,lng
+    3. server.py calls custom_router.get_custom_routes()
+    4. That function:
+       a. geocode_or_parse() — parses "lat,lng" or geocodes place names
+       b. fetch_osrm_routes() — calls OSRM API for up to 3 alternatives
+       c. For each route:
+          - sample_route_points() — picks 20 evenly-spaced points
+          - find_nearest_zone() — maps each point to closest of 6 zones
+          - Allocates time proportionally by zone
+          - Calculates exposure same as predefined routes
+       d. Returns sorted routes with geometries + coordinates
+    5. Results displayed in RouteComparison + RouteMap
+
+  Files involved:
+    LocationAutocomplete.jsx → RouteSearch.jsx → server.py →
+    custom_router.py → App.jsx → RouteComparison.jsx + RouteMap.jsx
+
+
+FEATURE 5: Interactive Route Map
+────────────────────────────────
+  What user sees: Dark-themed Leaflet map showing start (green marker),
+  destination (red marker), and all route alternatives as colored polylines.
+
+  How it works:
+    1. custom_router.py returns GeoJSON geometry for each route
+    2. RouteMap.jsx converts GeoJSON [lng,lat] to Leaflet [lat,lng]
+    3. Recommended route: solid green line, 5px wide, on top
+    4. Other routes: dashed yellow/red lines, 3px, behind
+    5. FitBounds component auto-zooms to show all routes
+    6. Click any route line for popup with name + exposure score
+    7. Uses dark CartoDB tiles to match dashboard theme
+
+  Files involved:
+    custom_router.py → server.py → App.jsx → RouteMap.jsx
+
+
+FEATURE 6: AI Route Intelligence Panel
+───────────────────────────────────────
+  What user sees: Three buttons that generate natural-language explanations:
+    - "Why is this route safer?"
+    - "What caused the pollution spike?"
+    - "Give health advice"
+
+  How it works:
+    1. User clicks a question button
+    2. AiPanel.jsx calls GET /api/explain/route (or /pollution or /health)
+    3. ai_explainer.py tries OpenAI GPT-3.5-turbo first
+    4. If no API key or API fails → uses rule-based fallback:
+       - Route safety: compares cleanest/worst zones, shows savings %
+       - Pollution: checks traffic level, zone type, wind speed
+       - Health: tiered advice based on avg/max AQI thresholds
+    5. Response rendered with basic markdown (bold, bullets)
+
+  Files involved:
+    AiPanel.jsx → server.py → ai_explainer.py (→ OpenAI API optional)
+
+
+FEATURE 7: Anomaly Alerts
+─────────────────────────
+  What user sees: "Recent Anomalies" section showing zones where AQI
+  spiked above 200, with timestamp.
+
+  How it works:
+    1. Pathway pipeline: zone_data.filter(pw.this.aqi > 200)
+    2. _on_anomaly callback appends to _anomalies list (max 50)
+    3. get_latest_state() returns last 10 anomalies
+    4. App.jsx renders them with amber styling
+
+  Files involved:
+    pathway_pipeline.py → server.py → App.jsx
+
+
+FEATURE 8: Real-Time SSE Stream
+───────────────────────────────
+  What it does: Server-Sent Events endpoint for real-time push updates
+  (alternative to polling).
+
+  How it works:
+    1. GET /api/stream returns a streaming response
+    2. Server loops: checks if processed_records changed
+    3. If new data, yields JSON payload with zones + routes + anomalies
+    4. Frontend can subscribe via EventSource (currently uses polling)
+
+  Files involved:
+    server.py → pathway_pipeline.py
+
+
+FEATURE 9: Live Connection Status
+──────────────────────────────────
+  What user sees: Green "LIVE" dot in header when connected, red "OFFLINE"
+  when backend is down. Shows last update timestamp.
+
+  How it works:
+    1. App.jsx fetchDashboard() sets connected=true on success, false on error
+    2. Header.jsx renders green/red indicator based on prop
+
+  Files involved:
+    App.jsx → Header.jsx
+
+
+6. DATA FLOW DIAGRAM
+================================================================================
+
+  ┌──────────────────────────────────────────────────────────────────┐
+  │                     REACT FRONTEND (:3000)                       │
+  │                                                                  │
+  │  RouteSearch ─→ LocationAutocomplete (autocomplete suggestions)  │
+  │       │                                                          │
+  │       └─→ RouteComparison + RouteMap (custom route results)      │
+  │                                                                  │
+  │  App.jsx polls /api/dashboard every 2s ─→ ZoneCards              │
+  │                                         ─→ HealthGauge           │
+  │                                         ─→ RouteComparison       │
+  │                                         ─→ Anomaly list          │
+  │                                                                  │
+  │  AiPanel ─→ /api/explain/* ─→ text explanations                  │
+  └──────────────────────────┬───────────────────────────────────────┘
+                             │ HTTP (localhost:8000)
+                             ▼
+  ┌──────────────────────────────────────────────────────────────────┐
+  │                  FASTAPI SERVER (server.py)                       │
+  │                                                                  │
+  │  /api/dashboard ──→ pipeline.get_latest_state()                  │
+  │  /api/routes ──→ route_calculator.calculate_all_routes()         │
+  │  /api/custom-routes ──→ custom_router.get_custom_routes()        │
+  │  /api/autocomplete ──→ custom_router.autocomplete_location()     │
+  │  /api/explain/* ──→ ai_explainer.*()                             │
+  └───────────┬──────────────────────────┬───────────────────────────┘
+              │                          │
+              ▼                          ▼
+  ┌─────────────────────┐    ┌──────────────────────────────────────┐
+  │  PATHWAY ENGINE      │    │  EXTERNAL APIS                       │
+  │  (Rust, streaming)   │    │                                      │
+  │                      │    │  Nominatim → geocoding/autocomplete  │
+  │  pw.io.jsonlines ◄───┤    │  OSRM → route alternatives          │
+  │  windowby(sliding)   │    │  OpenAI → AI explanations (optional) │
+  │  filter(aqi > 200)   │    │                                      │
+  │  pw.io.subscribe ────┤    └──────────────────────────────────────┘
+  │                      │
+  └──────────┬───────────┘
+             │ reads JSONL
+             ▼
+  ┌──────────────────────┐
+  │  DATA SIMULATOR       │
+  │  Writes 6 zone        │
+  │  records every 3s     │
+  │  → stream_data/*.jsonl│
+  └──────────────────────┘
+
+
+7. API ENDPOINTS REFERENCE
+================================================================================
+
+  GET /                      → Health check
+  GET /api/zones             → Latest zone data
+  GET /api/routes            → Predefined route comparisons
+  GET /api/dashboard         → Combined: zones + routes + anomalies
+  GET /api/autocomplete?q=   → Location autocomplete (Nominatim)
+  GET /api/custom-routes     → Custom route search (OSRM + exposure calc)
+      ?start=<place/coords>
+      &end=<place/coords>
+  GET /api/explain/route     → AI: "Why is this route safer?"
+  GET /api/explain/pollution → AI: "What caused the pollution spike?"
+  GET /api/explain/health    → AI: "Health advice for your commute"
+  GET /api/stream            → Server-Sent Events (real-time push)
+
+
+8. HOW TO RUN
+================================================================================
+
+  Prerequisites:
+    - Windows with WSL (Ubuntu) installed
+    - Node.js on Windows
+    - Python 3.10-3.12 in WSL
+
+  Backend (in WSL):
+    cd /root/aqi-backend
+    source .venv/bin/activate
+    python3 server.py
+    # Runs on http://localhost:8000
+
+  Frontend (in Windows terminal):
+    cd frontend
+    npm start
+    # Runs on http://localhost:3000
+
+  Both must be running simultaneously. The frontend polls the backend
+  every 2 seconds for live data.
+
+
+9. KEY ALGORITHMS
+================================================================================
+
+  EXPOSURE SCORE:
+    exposure = SUM over zones of (AQI * time_minutes * traffic_factor)
+    Lower = healthier
+
+  HEALTH SCORE (0-100):
+    health_score = 100 - (best_exposure / worst_exposure) * 100
+
+  SAVINGS PERCENTAGE:
+    savings = (1 - best_exposure / worst_exposure) * 100
+
+  HAVERSINE DISTANCE (for zone mapping):
+    Used to find which of the 6 zones is closest to any GPS coordinate.
+    Great-circle distance formula on Earth's surface (R = 6371 km).
+
+  ROLLING WINDOW (Pathway):
+    Sliding window of 10 ticks (30 seconds), hop of 1 tick
+    Per zone: avg, min, max, count, sum_of_squares
+    Volatility = sqrt(sum_sq/count - mean^2)
+    Trend = "rising" if current > avg+5, "falling" if current < avg-5
+
+  CUSTOM ROUTE ZONE MAPPING:
+    1. Sample 20 points evenly from route geometry
+    2. For each point, find nearest zone (haversine)
+    3. Count points per zone → proportional time allocation
+    4. Calculate exposure per zone, sum total
+
+
+================================================================================
+                          END OF DOCUMENTATION
+================================================================================
