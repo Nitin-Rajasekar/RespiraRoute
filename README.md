@@ -1,5 +1,5 @@
 # HealthyRoute AI
-
+<img width="1443" height="790" alt="Pic-2" src="https://github.com/user-attachments/assets/9a8c47d8-2d02-4c55-9704-8c9c3791f848" />
 **Real-Time Urban Air Quality & Healthier Route Recommendation System**
 
 A real-time system that monitors environmental conditions in city zones and recommends the healthiest commute route based on pollution exposure — powered by streaming data pipelines.
