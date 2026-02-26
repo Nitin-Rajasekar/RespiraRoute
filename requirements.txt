@@ -1,5 +1,5 @@
-fastapi==0.109.0
-uvicorn[standard]==0.27.0
+fastapi>=0.116.1
+uvicorn[standard]>=0.27.0
 pathway==0.29.1
 pathway[xpacks-llm]
 litellm==1.77.2.post1
